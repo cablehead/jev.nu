@@ -1,351 +1,342 @@
-<h1>
-<p align="center">
-  jev
-</h1>
-  <p align="center">
-    A <a href="https://www.nushell.sh">Nushell</a> module for <a href="https://typesafe.ai">TypeSafe</a>'s System One API: typed decisions with calibrated probabilities, for code that needs to branch on a judgement.
-    <br />
-    <a href="#install">Install</a>
-    ·
-    <a href="#reference">Reference</a>
-    ·
-    <a href="https://docs.typesafe.ai/api">API docs</a>
-  </p>
-</p>
+# jev
 
----
+A [Nushell](https://www.nushell.sh) module for [TypeSafe](https://typesafe.ai)'s
+System One API. Pipe in some content and ask typed questions about it. The
+answers are probabilities, so the rest of the pipeline can branch on a judgment.
 
-<!-- BEGIN mktoc -->
-
-- [Install](#install)
-- [Reference](#reference)
-  - [Ask: hello world](#ask-hello-world)
-  - [Configuration](#configuration)
-  - [Questions](#questions)
-    - [`jev noul` - yes/no](#jev-noul---yesno)
-    - [`jev choice` - pick one](#jev-choice---pick-one)
-    - [`jev score` - rate on a scale](#jev-score---rate-on-a-scale)
-  - [Ask everything at once](#ask-everything-at-once)
-  - [Confidence](#confidence)
-  - [Return modes](#return-modes)
-  - [Structured state](#structured-state)
-  - [Reviewing a request before sending it](#reviewing-a-request-before-sending-it)
-  - [Models](#models)
-  - [Errors and retries](#errors-and-retries)
-  - [Validation](#validation)
-- [Commands](#commands)
-- [Tests](#tests)
-
-<!-- END mktoc -->
+```nushell
+"Help! My payouts have been failing for 3 days." | jev ask {
+    urgent: (jev noul "Does this convey urgency?")
+} | get urgent.noul
+# => 0.95
+```
 
 ## Install
 
-The module is plain Nushell, with no build step and no dependencies. Clone it
-and point `use` at the module directory:
+Plain Nushell, with no build step and no dependencies.
 
 ```nushell
-$ git clone https://github.com/cablehead/jev.nu ~/src/jev.nu
-$ use ~/src/jev.nu/jev
-$ jev
-╭───┬────────────┬──────────────────────────────────────────╮
-│ # │    name    │               description                │
-├───┼────────────┼──────────────────────────────────────────┤
-│ 0 │ jev ask    │ Ask a batch of questions about one state │
-│ 1 │ jev choice │ Build a pick-one question                │
-│ 2 │ jev models │ List the models this account can send    │
-│ 3 │ jev noul   │ Build a yes/no question                  │
-│ 4 │ jev score  │ Build a rate-it-on-a-scale question      │
-╰───┴────────────┴──────────────────────────────────────────╯
+git clone https://github.com/cablehead/jev.nu
+use jev.nu/jev
+$env.TYPESAFE_API_KEY = "apikey_..."   # from https://console.typesafe.ai/keys
 ```
 
-Add it to `config.nu` to have it always loaded. Get a key from
-[console.typesafe.ai](https://console.typesafe.ai/keys) and export it:
+Put the last two lines in `config.nu` to keep them.
+
+## Tutorial
+
+### 1. State, questions, answers
+
+Jev is what TypeSafe calls a System One model. Like an LLM it reads natural
+language. It generates no text: you define the possible answers, and it returns
+a calibrated probability for each. A request has three parts.
+
+| Jev calls it | What it is                              | In this module                                             |
+| ------------ | --------------------------------------- | ---------------------------------------------------------- |
+| state        | The content to judge                    | The pipeline input to `jev ask`                            |
+| questions    | The judgments to make, each under an id | A record built with `jev noul`, `jev choice`, `jev score`  |
+| answers      | One typed answer per question           | The record `jev ask` returns, under the same ids           |
+
+In the example above the state is the customer's message, `urgent` is the id,
+and `0.95` is the probability that the answer is yes.
+
+Ask for a judgment a knowledgeable person makes in a second. "Does this convey
+urgency?" works. "Work out what to do about this ticket" does not: split it into
+small questions and decide in code.
+
+### 2. Three types of question
+
+| Builder      | Ask it when the answer is                 | The answer carries                               |
+| ------------ | ----------------------------------------- | ------------------------------------------------ |
+| `jev noul`   | yes or no                                 | `noul`, the probability of yes                   |
+| `jev choice` | one of a set, with no order between them  | `choice`, `probabilities`, `confidence`          |
+| `jev score`  | a position on a spectrum you can describe | `score`, `legend`, `probabilities`, `confidence` |
+
+A builder returns a record and sends nothing, so questions can sit in a variable
+where a person can review them.
 
 ```nushell
-$env.TYPESAFE_API_KEY = "apikey_..."
-```
-
-## Reference
-
-### Ask: hello world
-
-State goes in on the pipeline. Questions come in as a record, and the answers
-come back under the same keys.
-
-```nushell
-$ "Help! My payouts have been failing for 3 days." | jev ask {
-    urgent: (jev noul "Does this convey urgency?")
-  } | get urgent.noul
-0.95
-```
-
-No text, no parsing. `0.95` is the model's probability that the answer is yes.
-Answers nest, so `to nuon` is the quickest way to see a whole one at the prompt.
-
-### Configuration
-
-| Variable             | Meaning                      | Default                      |
-| -------------------- | ---------------------------- | ---------------------------- |
-| `TYPESAFE_API_KEY`   | API key. Required.           | none                         |
-| `JEV_MODEL`          | Default model or alias       | `jev-latest`                 |
-| `JEV_BASE_URL`       | Endpoint, for testing        | `https://api.typesafe.ai/v1` |
-
-### Questions
-
-Three question types, three builders. Each returns a record and sends nothing,
-so you can hold them in a constant and review them in one place.
-
-#### `jev noul` - yes/no
-
-Answers with the probability that the answer is yes, from 0 to 1. Near 0.5 means
-the model splits its bet, not that the truth is in the middle. There is no
-confidence on a noul: the value is already the certainty.
-
-```nushell
-$ jev noul "The message reports a bug"
-$ jev noul "Does this convey urgency?" --yes "Explicitly time-sensitive" --no "No urgency expressed"
-```
-
-`--yes` and `--no` describe what each side means. They land in the request as
-`criteria.true` and `criteria.false`.
-
-#### `jev choice` - pick one
-
-For an answer that is one of a known set with no order between them. Map each
-option to a description, or to `null` when the name says enough.
-
-```nushell
-$ "Help! My payouts have been failing for 3 days." | jev ask {
-    dept: (jev choice "Which team should handle this?" {
-      billing: "Payments, invoicing, refunds"
-      technical: "Bugs, outages, integrations"
-      sales: null
+let questions = {
+    team: (jev choice "Which team should handle this?" {
+        billing: "Payments, invoicing, refunds"
+        technical: "Bugs, outages, integrations"
+        sales: null     # the name says enough
     })
-  } | get dept | to nuon
-{type: choice, choice: billing, confidence: 0.79, probabilities: {technical: 0.14, billing: 0.86, sales: 0.0}}
-```
-
-Add an `other` option when the list might not cover every input.
-
-#### `jev score` - rate on a scale
-
-For an answer that falls on a spectrum you can describe. Levels are ordered,
-lowest first.
-
-```nushell
-$ "Help! My payouts have been failing for 3 days." | jev ask {
-    frustration: (jev score "How frustrated is the customer?" ["Calm" "Frustrated" "Very angry"])
-  } | get frustration | to nuon
-{type: score, score: 1.04, confidence: 0.94, legend: {"0": Calm, "1": Frustrated, "2": "Very angry"}, probabilities: {"0": 0.0, "1": 0.96, "2": 0.04}}
-```
-
-The score is probability-weighted, so it lands between levels. Read it as a
-number and threshold it, not as an index.
-
-### Ask everything at once
-
-Every question in a request is evaluated against the state in parallel, and only
-input tokens are billed. Batching 13 questions into one call measures 12x cheaper
-and 10x faster than 13 calls, with the same answers. So ask everything the code
-might need, including questions whose answer only matters for some inputs, and
-ignore the ones you do not use.
-
-```nushell
-$ let questions = {
-    dept: (jev choice "Which team should handle this?" {billing: null, technical: null, sales: null})
     urgent: (jev noul "Does this convey urgency?")
-    frustration: (jev score "How frustrated is the customer?" ["Calm" "Frustrated" "Very angry"])
-  }
+    anger: (jev score "How frustrated is the customer?" ["Calm" "Frustrated" "Very angry"])
+}
 
-$ let a = "Help! My payouts have been failing for 3 days." | jev ask $questions
-$ if $a.urgent.noul > 0.8 and $a.frustration.score > 1.5 { page-someone } else { queue $a.dept.choice }
+"Help! My payouts have been failing for 3 days." | jev ask $questions | table -e
+# => ╭────────┬──────────────────────────────────────────╮
+# => │        │ ╭───────────────┬──────────────────────╮ │
+# => │ team   │ │ type          │ choice               │ │
+# => │        │ │ choice        │ billing              │ │
+# => │        │ │ confidence    │ 0.76                 │ │
+# => │        │ │               │ ╭───────────┬──────╮ │ │
+# => │        │ │ probabilities │ │ sales     │ 0.00 │ │ │
+# => │        │ │               │ │ technical │ 0.16 │ │ │
+# => │        │ │               │ │ billing   │ 0.84 │ │ │
+# => │        │ │               │ ╰───────────┴──────╯ │ │
+# => │        │ ╰───────────────┴──────────────────────╯ │
+# => │        │ ╭──────┬──────╮                          │
+# => │ urgent │ │ type │ noul │                          │
+# => │        │ │ noul │ 0.95 │                          │
+# => │        │ ╰──────┴──────╯                          │
+# => │        │ ╭───────────────┬────────────────────╮   │
+# => │ anger  │ │ type          │ score              │   │
+# => │        │ │ score         │ 1.04               │   │
+# => │        │ │ confidence    │ 0.93               │   │
+# => │        │ │               │ ╭───┬────────────╮ │   │
+# => │        │ │ legend        │ │ 0 │ Calm       │ │   │
+# => │        │ │               │ │ 1 │ Frustrated │ │   │
+# => │        │ │               │ │ 2 │ Very angry │ │   │
+# => │        │ │               │ ╰───┴────────────╯ │   │
+# => │        │ │               │ ╭───┬──────╮       │   │
+# => │        │ │ probabilities │ │ 0 │ 0.00 │       │   │
+# => │        │ │               │ │ 1 │ 0.95 │       │   │
+# => │        │ │               │ │ 2 │ 0.05 │       │   │
+# => │        │ │               │ ╰───┴──────╯       │   │
+# => │        │ ╰───────────────┴────────────────────╯   │
+# => ╰────────┴──────────────────────────────────────────╯
 ```
 
-A judgement that depends on several things gets split into one question per
-thing, combined with weights you keep in code. When the result does not match
-what your team would decide, change the weights, not a prompt.
+A `score` is each level number weighted by its probability, so it lands between
+levels: 1.04 is "Frustrated", leaning a little toward "Very angry". Compare it
+to a threshold. Do not use it as an index.
 
-### Confidence
+A `noul` near 0.5 means the model cannot tell. It does not mean "somewhat". To
+measure how much, use a score.
 
-Choice and score answers carry a `confidence` from 0 to 1, derived from how
-peaked the probability distribution is. Gate on it by stakes: a wrong read-only
-answer is recoverable, a wrong destructive one is not.
+The model sees the instructions and the descriptions, never the question id, so
+write the whole question in the instructions. It matches the state against each
+score level on its own, so describe a situation ("a workaround exists"), not a
+degree ("moderate"). Instructions and descriptions also take a record or a list,
+for a rubric with examples. See
+[Advanced: structure](https://docs.typesafe.ai/primitives/advanced).
+
+### 3. Ask everything in one call
+
+Jev reads the state once and answers every question in parallel, each on its
+own. Only input tokens are billed. TypeSafe measured 13 questions in one call at
+12x cheaper and 10x faster than 13 calls.
+
+So ask every question the code might need, including ones that matter for only
+some inputs, and ignore the answers it does not need. Make a second call only
+when the code cannot build it without an answer from the first.
+
+### 4. Confidence says whether to act
+
+This ticket is about a delivery and about a charge.
 
 ```nushell
-match $a.dept {
-  {confidence: $c} if $c < 0.5 => (route-to-human $ticket)
-  {choice: "billing", confidence: $c} if $c > 0.9 => (auto-refund $ticket)
-  {choice: $team} => (queue $team)
+"I ordered the standing desk two weeks ago and tracking still says label created. Was I even charged?"
+| jev ask {
+    team: (jev choice "Which team should handle this?" {
+        billing: "Charges, invoices, refunds"
+        orders: "Order status, delivery, returns"
+        account: "Login, password, profile"
+    })
+} | get team | reject type | table -e
+# => ╭───────────────┬────────────────────╮
+# => │ choice        │ orders             │
+# => │ confidence    │ 0.29               │
+# => │               │ ╭─────────┬──────╮ │
+# => │ probabilities │ │ orders  │ 0.53 │ │
+# => │               │ │ billing │ 0.47 │ │
+# => │               │ │ account │ 0.00 │ │
+# => │               │ ╰─────────┴──────╯ │
+# => ╰───────────────┴────────────────────╯
+```
+
+`choice` is always the most probable option, even when it barely wins.
+`confidence` runs from 0, for probability spread flat, to 1, for all of it on
+one option. Set the bar by what a wrong answer costs:
+
+```nushell
+match $answers.team {
+    {confidence: $c} if $c < 0.5 => (ask-a-human $ticket)
+    {choice: billing, confidence: $c} if $c > 0.9 => (refund $ticket)
+    {choice: $team} => (queue $team $ticket)
 }
 ```
 
-The full `probabilities` map is always in the answer, so you are free to compute
-your own measure instead.
+A noul has no `confidence`. Its distance from 0.5 is the certainty.
 
-### Return modes
+Answers move a little between runs: the same request a moment earlier gave 0.39.
+Leave room around a threshold. `jev-latest` also moves when TypeSafe ships a
+model, so once thresholds are tuned, pin the version with `--model jev-1.13.0`.
 
-`--return answers` is the default. `full` gives the envelope, which is where the
-resolved model id and the token usage live:
+### 5. Give the state structure
 
-```nushell
-$ $ticket | jev ask --return full $questions | select model usage | to nuon
-{model: "jev-1.13.0", usage: {input_tokens: 414, output_tokens: 70}}
-```
-
-An alias moves when a release ships, so log `model` if you have tuned thresholds
-against a version.
-
-`merged` adds an `answers` column to a record state, which is what keeps a table
-a table:
+A state can be a record or a list. Put everything the decision depends on into
+one state, and name the part a question is about with a path in backticks.
 
 ```nushell
-$ open tickets.json | each {|t| $t | jev ask --return merged $questions }
-  | select id answers.dept.choice answers.dept.confidence answers.urgent.noul
-╭───┬────┬─────────────────────┬─────────────────────────┬─────────────────────╮
-│ # │ id │ answers.dept.choice │ answers.dept.confidence │ answers.urgent.noul │
-├───┼────┼─────────────────────┼─────────────────────────┼─────────────────────┤
-│ 0 │  1 │ billing             │                    1.00 │                0.63 │
-│ 1 │  2 │ technical           │                    1.00 │                0.89 │
-╰───┴────┴─────────────────────┴─────────────────────────┴─────────────────────╯
-```
-
-From there it is ordinary Nushell: `where answers.urgent.noul > 0.8`,
-`sort-by answers.frustration.score`.
-
-### Structured state
-
-State can be a record or a list, not just a string. When a question is about one
-part of it, name that part in the instructions with a dot path in backticks.
-
-```nushell
-$ {
-    ticket: {subject: "Duplicate charge", body: "I was charged twice for order A-104."}
-    order: {id: "A-104", charges: [{amount_usd: 49}, {amount_usd: 49}]}
+{
+    ticket: {subject: "Duplicate charge", body: "I was charged twice for order A-104. Please refund the duplicate."}
+    order: {id: "A-104", charges: [{amount_usd: 49, status: captured}, {amount_usd: 49, status: captured}]}
     refund_policy: "Duplicate charges are eligible for a refund."
-  } | jev ask {
+} | jev ask {
     requested: (jev noul "Does `ticket.body` request a refund?")
-    supported: (jev noul "Does `refund_policy` support a refund, given `order.charges`?")
-  }
+    supported: (jev noul "Does `refund_policy` support the refund requested in `ticket.body`, given `order.charges`?")
+} | to nuon
+# => {requested: {type: noul, noul: 0.99}, supported: {type: noul, noul: 0.98}}
 ```
 
-### Reviewing a request before sending it
+Send only what the questions need. Accuracy falls as unrelated detail piles up.
 
-`--payload` returns the body instead of sending it. The questions and the
-thresholds are the part a human needs to read, so make them easy to look at.
+### 6. A node in a pipeline
+
+`jev ask` takes one state, and a list is one state: a conversation, say. To
+judge each row of a table, `insert` runs it once per row and keeps the row,
+which leaves the answers where `where` and `sort-by` can reach them.
+
+This reads a repository's open issues with `gh` and has jev judge each one:
 
 ```nushell
-$ "a ticket" | jev ask --payload {urgent: (jev noul "Is this urgent?")} | to nuon
-{state: "a ticket", model: "jev-latest", questions: {urgent: {type: noul, instructions: "Is this urgent?"}}}
+let questions = {
+    kind: (jev choice "What kind of issue is this?" {
+        bug: "Something does not work the way the docs or common sense say it should"
+        feature: "A request for new behavior"
+        question: "The author is asking how to do something"
+        other: null
+    })
+    repro: (jev noul "Does `body` include a command or steps that reproduce the problem?")
+    severity: (jev score "How badly does the problem in `body` hurt the person reporting it?" [
+        "Cosmetic, or an easy workaround exists"
+        "A feature is broken, and the workaround is awkward"
+        "A crash, a hang, lost data, or no workaround"
+    ])
+}
+
+let triaged = gh issue list --repo nushell/nushell --limit 12 --json number,title,body
+    | from json
+    | update body { str substring 0..3000 }     # a pasted log adds tokens, not signal
+    | insert jev { select title body | jev ask $questions }
 ```
 
-### Models
+`repro` and `severity` only matter for a bug. They are asked of every issue
+anyway, because a question costs a few tokens and a second request costs a round
+trip.
+
+From here it is ordinary Nushell, steered by jev's answers. This ranks the bugs:
 
 ```nushell
-$ jev models
-╭───┬─────────────┬────────────┬───────────────────────────────────────────────╮
-│ # │    name     │  released  │                  description                  │
-├───┼─────────────┼────────────┼───────────────────────────────────────────────┤
-│ 0 │ jev-latest  │ a week ago │ The latest iteration of TypeSafe's System One │
-│   │             │            │  Model: Jev                                   │
-│ 1 │ jev-preview │ a week ago │ A preview version of `jev-latest`: should be  │
-│   │             │            │ better in most ways                           │
-╰───┴─────────────┴────────────┴───────────────────────────────────────────────╯
+$triaged
+| where jev.kind.choice == bug and jev.kind.confidence > 0.8
+| insert priority {|issue| 0.7 * $issue.jev.severity.score / 2 + 0.3 * $issue.jev.repro.noul }
+| sort-by priority --reverse
+| select number title priority
+| first 4
+# => ╭───┬────────┬──────────────────────────────────────────────────────────────────────────┬──────────╮
+# => │ # │ number │                                  title                                   │ priority │
+# => ├───┼────────┼──────────────────────────────────────────────────────────────────────────┼──────────┤
+# => │ 0 │  19035 │ Infinite memory allocation when `print` runs inside a streaming closure  │     0.97 │
+# => │   │        │ with a zero-width terminal                                               │          │
+# => │ 1 │  18989 │ Handle to background job is dropped if `$env.PROMPT` closure is exited   │     0.82 │
+# => │   │        │ prematurely                                                              │          │
+# => │ 2 │  19016 │ External completer migration from #18791 completes the wrong command     │     0.70 │
+# => │   │        │ after a pipe                                                             │          │
+# => │ 3 │  18983 │ Errors in a menu `source` closure are dropped silently                   │     0.65 │
+# => ╰───┴────────┴──────────────────────────────────────────────────────────────────────────┴──────────╯
 ```
 
-`--model` completes from this list, cached in `$nu.cache-dir` for a day. A
-versioned id like `jev-1.13.0` is accepted whether or not it appears.
+`priority` splits one judgment in two and weights the parts in code. `/ 2` puts
+the three-level score on 0 to 1. When the ranking disagrees with your team,
+change a weight, not a prompt.
 
-### Errors and retries
-
-429 and 529 are retried with backoff, honoring `retry-after` when the response
-carries one, three times by default. Everything else fails with the reason and
-the request id:
+And this acts on them, leaving the issues jev is unsure of to a person:
 
 ```nushell
-$ $ticket | jev ask $questions
-Error: nu::shell::error
-
-  x typesafe 401: Cannot authenticate with the server. Please check your API key and try again.
-  help: Check $env.TYPESAFE_API_KEY. Keys are issued at https://console.typesafe.ai/keys
-        request id: req_01a0b62941e07e429e4ae0cc556693dd
+$triaged | each {|issue|
+    let label = match $issue.jev.kind {
+        {confidence: $c} if $c < 0.8 => "needs-triage"
+        {choice: $kind} => $kind
+    }
+    gh issue edit $issue.number --repo nushell/nushell --add-label $label
+}
 ```
 
-### Validation
-
-The builders check the shape of a question before it costs a round trip, and the
-error points at your source:
+`insert` sends one request after another: 4 seconds for these 12 issues.
+`par-each` sends them together, in 0.4 seconds:
 
 ```nushell
-$ jev choice "Which team?" {billing: null}
-Error: nu::shell::error
-
-  x too few options
-   ,-[entry #1:1:26]
- 1 │ jev choice "Which team?" {billing: null}
-   ·                          ───────┬───────
-   ·                                 ╰── 1 of the 2 options a choice needs
-   ╰────
-  help: A choice needs at least two options. For a yes/no judgment use `jev noul`.
+| par-each --keep-order {|issue| $issue | insert jev { select title body | jev ask $questions } }
 ```
 
-> [!NOTE]
-> A one-level score is worth catching here, because the API accepts it and
-> answers `score: 0.0, confidence: 1.0`. That looks like a strong answer and
-> means nothing.
+[`examples/triage.nu`](examples/triage.nu) is the runnable version:
+`nu examples/triage.nu nushell/nushell`. It reads with `gh` and changes nothing.
 
-Raw question records work too. The builders only add the checking.
+## Reference
+
+`jev` lists the commands. `help jev ask` has the detail and examples for each.
 
 ```nushell
-$ $ticket | jev ask {urgent: {type: "noul", instructions: "Is this urgent?"}}
+jev noul <instructions> [--yes <description>] [--no <description>]
+jev choice <instructions> <options>     # record: option -> description, or null
+jev score <instructions> <levels>       # list of descriptions, lowest first
+<state> | jev ask <questions>           # record: id -> question. Returns id -> answer
+jev models
 ```
 
-## Commands
+| `jev ask` flag  | Meaning                                                                 |
+| --------------- | ----------------------------------------------------------------------- |
+| `--model`, `-m` | Model or alias. Defaults to `$env.JEV_MODEL`, then `jev-latest`         |
+| `--full`, `-f`  | Return the whole response: `answers`, `usage`, and the `model` version that answered |
+| `--dry-run`     | Return the request body and send nothing                                |
+| `--max-retries` | Retries on 429 and 529, honoring `retry-after`. Default 3               |
+| `--timeout`     | Per attempt. Default 2min                                               |
+
+| Variable           | Meaning               | Default                      |
+| ------------------ | --------------------- | ---------------------------- |
+| `TYPESAFE_API_KEY` | API key. Required     | none                         |
+| `JEV_MODEL`        | Model or alias        | `jev-latest`                 |
+| `JEV_BASE_URL`     | Endpoint, for testing | `https://api.typesafe.ai/v1` |
+
+Limits: a choice takes 2 to 255 options, a score 2 to 10 levels. A request holds
+64k tokens, with 32k for the state plus the longest question.
+
+A question can also be a raw record in the
+[API's shape](https://docs.typesafe.ai/api#question-types). `jev ask` checks it
+the way the builders do.
+
+### Errors
+
+A question the API would reject, or would answer with nonsense, fails before
+anything is sent, and the error points at your source:
 
 ```nushell
-jev noul [
-  instructions: any           # string, record, or list
-  --yes: string               # what a yes (near 1) means
-  --no: string                # what a no (near 0) means
-]: nothing -> record
-
-jev choice [
-  instructions: any
-  criteria: record            # option -> description, or null
-]: nothing -> record
-
-jev score [
-  instructions: any
-  criteria: list              # ordered levels, lowest first
-]: nothing -> record
-
-jev ask [
-  questions: record           # question id -> question
-  --model (-m): string        # default $env.JEV_MODEL
-  --return (-r): string       # answers (default), full, merged
-  --payload                   # return the request body, send nothing
-  --max-retries: int          # on 429 and 529, default 3
-  --timeout: duration         # per attempt, default 2min
-]: [string -> any, record -> any, list -> any]
-
-jev models []: nothing -> table
+jev score "How angry?" ["Furious"]
+# => Error: nu::shell::error
+# =>
+# =>   x too few levels
+# =>    ,-[source:1:24]
+# =>  1 | jev score "How angry?" ["Furious"]
+# =>    :                        ^^^^^|^^^^^
+# =>    :                             `-- 1 of the 2 levels a score needs
+# =>    `----
+# =>   help: The API scores a lone level 0 with full confidence, which tells you
+# =>         nothing. For a yes/no judgment use `jev noul`.
 ```
+
+An error from the API carries the status, the reason, and the request id. A 429
+or a 529 is retried first.
 
 ## Tests
 
-```bash
-$ nu tests/examples.nu
-╭───┬────────────┬─────────────────────────────────────────────────┬──────╮
-│ # │    name    │                     example                     │  ok  │
-├───┼────────────┼─────────────────────────────────────────────────┼──────┤
-│ 0 │ jev ask    │ review the request without sending it           │ true │
-│ 1 │ jev choice │ route a ticket, describing two of three options │ true │
-│ 2 │ jev noul   │ a bare yes/no question                          │ true │
-│ 3 │ jev noul   │ spell out what each side means                  │ true │
-│ 4 │ jev score  │ rate customer frustration on three levels       │ true │
-╰───┴────────────┴─────────────────────────────────────────────────┴──────╯
-5 passed, 3 skipped
+```nushell
+nu tests/run.nu
 ```
 
-Every `@example` that records a `--result` runs as a test. The builders are pure,
-so their examples are the suite. Examples that reach the API record no result and
-are skipped: they cost money and their answers move with the model.
+Nothing in the suite reaches TypeSafe. Every `@example` in the module that
+records a result runs as a test. The rest check the errors, and `jev ask` on the
+wire against [`tests/stub.nu`](tests/stub.nu), a stand-in for the API served by
+[http-nu](https://github.com/cablehead/http-nu). Without `http-nu` on the PATH
+those are skipped.
+
+## Learn more
+
+TypeSafe's docs go deeper on the [concepts](https://docs.typesafe.ai/primitives)
+and the [patterns](https://docs.typesafe.ai/patterns) this tutorial borrows.
+[Jev 1.13 jaggedness](https://docs.typesafe.ai/model-jaggedness/jev-1.13) lists
+where the model is weak. Arithmetic, counting, and date math belong in code.
