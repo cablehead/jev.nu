@@ -1,0 +1,5 @@
+# nushell
+*.nuon.bak
+
+# editors
+.DS_Store
