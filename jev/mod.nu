@@ -1,70 +1,122 @@
 # Typed decisions from the TypeSafe System One API
 #
-# Build questions with `jev noul`, `jev choice`, and `jev score`, then send them
-# together against one state with `jev ask`. Every question in a request is
-# evaluated against the state in parallel and priced only on input tokens, so
-# batching is both cheaper and faster than one call per question.
+# A System One model reads a state and answers typed questions about it with
+# calibrated probabilities, so code can branch on a judgment. Build questions
+# with `jev noul`, `jev choice`, and `jev score`, then put them to a state with
+# `jev ask`.
 #
-# Reads the API key from $env.TYPESAFE_API_KEY and the default model from
-# $env.JEV_MODEL.
+# $env.TYPESAFE_API_KEY  required, from https://console.typesafe.ai/keys
+# $env.JEV_MODEL         default model, `jev-latest` when unset
+# $env.JEV_BASE_URL      endpoint, to point the module at a stub
 
-const DEFAULT_BASE_URL = "https://api.typesafe.ai/v1"
+const BASE_URL = "https://api.typesafe.ai/v1"
 const DEFAULT_MODEL = "jev-latest"
-const FALLBACK_MODELS = [jev-latest jev-preview]
+const MODEL_ALIASES = [jev-latest jev-preview]
 const RETRY_STATUS = [429 529]
-const RETURN_MODES = [answers full merged]
-const QUESTION_TYPES = [noul choice score]
+const MAX_RETRY_WAIT = 1min
 
-export-env {
-    $env.JEV_MODEL = $env.JEV_MODEL? | default $DEFAULT_MODEL
-    $env.JEV_BASE_URL = $env.JEV_BASE_URL? | default $DEFAULT_BASE_URL
+# Instructions and every description take text or JSON structure.
+const ENTRY_TYPES = [string record list]
+const MAX_OPTIONS = 255
+const MAX_LEVELS = 10
+
+def fail [msg: string, label: string, span: record, help: string] {
+    error make { msg: $msg, label: { text: $label, span: $span }, help: $help }
 }
 
-def fail [msg: string, text: string, span: record, help: string] {
-    error make {
-        msg: $msg
-        label: { text: $text, span: $span }
-        help: $help
+def type-of []: any -> string {
+    describe --detailed | get type
+}
+
+# Check one question against the shapes the API accepts.
+#
+# The API answers a one-option choice or a one-level score with full confidence,
+# which reads as a strong answer and means nothing, so both are errors here.
+# `spans` says where to point. A builder passes the span of each argument.
+# `jev ask` passes the span of its questions record, and the id of the question.
+def check-question [
+    question: record
+    spans: record<instructions: record, criteria: record>
+    --id: string
+] {
+    let prefix = if $id == null { "" } else { $"question ($id): " }
+    let type = $question.type? | default "nothing"
+    let instructions = $question.instructions?
+    let criteria = $question.criteria?
+
+    if $type not-in [noul choice score] {
+        fail $"($prefix)unknown type" $"type is ($type)" $spans.instructions "A question type is noul, choice, or score."
     }
-}
 
-def base-url [] {
-    $env.JEV_BASE_URL? | default $DEFAULT_BASE_URL
-}
-
-def auth-headers [] {
-    let key = $env.TYPESAFE_API_KEY? | default ""
-    if ($key | is-empty) {
-        error make --unspanned {
-            msg: "no TypeSafe API key"
-            help: "Set $env.TYPESAFE_API_KEY. Keys are issued at https://console.typesafe.ai/keys"
-        }
-    }
-    { Authorization: $"Bearer ($key)" }
-}
-
-# Instructions accept a string, a record, or a list. Anything else is a mistake
-# worth catching before it costs a round trip.
-def check-instructions [instructions: any, span: record] {
-    let type = $instructions | describe -d | get type
-    if $type not-in [string record list] {
-        (fail "invalid instructions" $"instructions is a ($type)" $span "Instructions must be a string, a record, or a list.")
+    if ($instructions | type-of) not-in $ENTRY_TYPES {
+        fail $"($prefix)invalid instructions" $"instructions is ($instructions | type-of)" $spans.instructions "Instructions are a string, a record, or a list."
     }
     if ($instructions | is-empty) {
-        (fail "empty instructions" "nothing to ask" $span "Write the whole question here. The question id is never sent to the model.")
+        fail $"($prefix)empty instructions" "nothing to ask" $spans.instructions "Write the whole question here. The model never sees the question id."
+    }
+
+    match $type {
+        "noul" => {
+            if $criteria == null { return }
+            if ($criteria | type-of) != "record" {
+                fail $"($prefix)invalid criteria" $"criteria is ($criteria | type-of)" $spans.criteria "Noul criteria is a record with a `true` and a `false` description."
+            }
+            for side in ($criteria | columns) {
+                if $side not-in ["true" "false"] {
+                    fail $"($prefix)invalid criteria" $"($side) is not a side of a noul" $spans.criteria "The sides are named `true` and `false`. The API ignores any other key."
+                }
+                if ($criteria | get $side | type-of) not-in $ENTRY_TYPES {
+                    fail $"($prefix)invalid criteria" $"($side) is ($criteria | get $side | type-of)" $spans.criteria "Describe a side with a string, a record, or a list."
+                }
+            }
+        }
+        "choice" => {
+            if ($criteria | type-of) != "record" {
+                fail $"($prefix)invalid options" $"criteria is ($criteria | type-of)" $spans.criteria "Choice criteria is a record of option -> description."
+            }
+            let count = $criteria | columns | length
+            if $count < 2 {
+                fail $"($prefix)too few options" $"($count) of the 2 options a choice needs" $spans.criteria "The API picks a lone option with full confidence, which tells you nothing. For a yes/no judgment use `jev noul`."
+            }
+            if $count > $MAX_OPTIONS {
+                fail $"($prefix)too many options" $"($count) options" $spans.criteria $"A choice takes up to ($MAX_OPTIONS) options."
+            }
+            for option in ($criteria | columns) {
+                if ($criteria | get $option | type-of) not-in [...$ENTRY_TYPES nothing] {
+                    fail $"($prefix)invalid option" $"($option) is ($criteria | get $option | type-of)" $spans.criteria "Describe an option with a string, a record, or a list. Use null when the name says enough."
+                }
+            }
+        }
+        "score" => {
+            if ($criteria | type-of) != "list" {
+                fail $"($prefix)invalid levels" $"criteria is ($criteria | type-of)" $spans.criteria "Score criteria is a list of level descriptions, lowest first."
+            }
+            let count = $criteria | length
+            if $count < 2 {
+                fail $"($prefix)too few levels" $"($count) of the 2 levels a score needs" $spans.criteria "The API scores a lone level 0 with full confidence, which tells you nothing. For a yes/no judgment use `jev noul`."
+            }
+            if $count > $MAX_LEVELS {
+                fail $"($prefix)too many levels" $"($count) levels" $spans.criteria $"A score takes up to ($MAX_LEVELS) levels. Use only as many as you can describe distinctly."
+            }
+            for level in ($criteria | enumerate) {
+                if ($level.item | type-of) not-in $ENTRY_TYPES {
+                    fail $"($prefix)invalid level" $"level ($level.index) is ($level.item | type-of)" $spans.criteria "Describe a level with a string, a record, or a list. The description is all the model sees of it."
+                }
+            }
+        }
     }
 }
 
 # Build a yes/no question
 #
-# The answer is the probability that the answer is yes, from 0 to 1. Near 0.5
-# means the model splits its bet, not that the truth is somewhere in the middle.
-# Reach for `jev score` when you want a position on a spectrum.
+# The answer is the probability of yes, from 0 to 1. Near 0.5 means the model
+# splits its bet, not that the truth is in the middle: for a position on a
+# spectrum use `jev score`. Phrase the question so that a high value means yes.
 @search-terms typesafe question boolean probability
-@example "a bare yes/no question" {
-    jev noul "The message reports a bug"
-} --result { type: noul, instructions: "The message reports a bug" }
-@example "spell out what each side means" {
+@example "a yes/no question" {
+    jev noul "Does the message report a bug?"
+} --result { type: noul, instructions: "Does the message report a bug?" }
+@example "pin down what each side means" {
     jev noul "Does this convey urgency?" --yes "Explicitly time-sensitive" --no "No urgency expressed"
 } --result {
     type: noul
@@ -72,31 +124,30 @@ def check-instructions [instructions: any, span: record] {
     criteria: { "true": "Explicitly time-sensitive", "false": "No urgency expressed" }
 }
 export def noul [
-    instructions: any       # The yes/no question: a string, record, or list
-    --yes: string           # What a yes (near 1) means
-    --no: string            # What a no (near 0) means
+    instructions: any       # The question, or a statement to judge: a string, record, or list
+    --yes: any              # What a yes (near 1) means
+    --no: any               # What a no (near 0) means
 ]: nothing -> record {
-    check-instructions $instructions (metadata $instructions).span
+    let criteria = [
+        (if $yes != null { { "true": $yes } })
+        (if $no != null { { "false": $no } })
+    ] | compact | into record
 
-    mut criteria = {}
-    if ($yes | is-not-empty) { $criteria = ($criteria | insert "true" $yes) }
-    if ($no | is-not-empty) { $criteria = ($criteria | insert "false" $no) }
+    let question = { type: "noul", instructions: $instructions }
+        | if ($criteria | is-empty) { } else { insert criteria $criteria }
 
-    if ($criteria | is-empty) {
-        { type: "noul", instructions: $instructions }
-    } else {
-        { type: "noul", instructions: $instructions, criteria: $criteria }
-    }
+    let span = (metadata $instructions).span
+    check-question $question { instructions: $span, criteria: $span }
+    $question
 }
 
 # Build a pick-one question
 #
-# Criteria maps each option to a description of it, or to null when the option
-# name says enough. The answer carries the winning option, the probability of
-# every option, and a confidence derived from that distribution. Add an `other`
-# option when the list might not cover every input.
+# The answer carries the winning option, the probability of every option, and a
+# confidence derived from that distribution. Give the full list of options, and
+# an `other` when the list might not cover every input.
 @search-terms typesafe question classify route category
-@example "route a ticket, describing two of three options" {
+@example "route a ticket" {
     jev choice "Which team should handle this?" {
         billing: "Payments, invoicing, refunds"
         technical: "Bugs, outages, integrations"
@@ -107,34 +158,39 @@ export def noul [
     instructions: "Which team should handle this?"
     criteria: { billing: "Payments, invoicing, refunds", technical: "Bugs, outages, integrations", sales: null }
 }
+@example "say what an option is not for, when two options blur" {
+    jev choice "Which team should handle this?" {
+        billing: { what: "Charges and refunds", not_for: "Order tracking" }
+        orders: { what: "Delivery and returns", not_for: "Charges" }
+    }
+} --result {
+    type: choice
+    instructions: "Which team should handle this?"
+    criteria: {
+        billing: { what: "Charges and refunds", not_for: "Order tracking" }
+        orders: { what: "Delivery and returns", not_for: "Charges" }
+    }
+}
 export def choice [
     instructions: any       # What to decide: a string, record, or list
-    criteria: record        # Option name -> description, or null for no description
+    options: record         # Option -> description, or null when the name says enough
 ]: nothing -> record {
-    let span = (metadata $criteria).span
-    check-instructions $instructions (metadata $instructions).span
-
-    if ($criteria | columns | length) < 2 {
-        (fail "too few options" $"($criteria | columns | length) of the 2 options a choice needs" $span "A choice needs at least two options. For a yes/no judgment use `jev noul`.")
+    let question = { type: "choice", instructions: $instructions, criteria: $options }
+    check-question $question {
+        instructions: (metadata $instructions).span
+        criteria: (metadata $options).span
     }
-
-    for option in ($criteria | columns) {
-        let type = $criteria | get $option | describe -d | get type
-        if $type not-in [string nothing] {
-            (fail "invalid option description" $"($option) is a ($type)" $span "Each option maps to a description string, or to null for no description.")
-        }
-    }
-
-    { type: "choice", instructions: $instructions, criteria: $criteria }
+    $question
 }
 
 # Build a rate-it-on-a-scale question
 #
-# Criteria is the ordered list of levels, lowest first. The answer is a
-# probability-weighted position along them and can land between two levels, so
-# read it as a number rather than an index.
+# The answer is a probability-weighted position along the levels. It can land
+# between two of them, so threshold it as a number. The model matches the state
+# against each description on its own, so describe situations ("workaround
+# exists"), not degrees ("moderate").
 @search-terms typesafe question rate scale severity rubric
-@example "rate customer frustration on three levels" {
+@example "rate customer frustration" {
     jev score "How frustrated is the customer?" ["Calm" "Frustrated" "Very angry"]
 } --result {
     type: score
@@ -143,79 +199,63 @@ export def choice [
 }
 export def score [
     instructions: any       # What to rate: a string, record, or list
-    criteria: list          # Ordered level descriptions, lowest first
+    levels: list            # Level descriptions, lowest first, 2 to 10 of them
 ]: nothing -> record {
-    let span = (metadata $criteria).span
-    check-instructions $instructions (metadata $instructions).span
-
-    if ($criteria | length) < 2 {
-        (fail "too few levels" $"($criteria | length) of the 2 levels a score needs" $span "A score needs at least two levels. The API accepts one and always answers 0 with full confidence, which tells you nothing.")
+    let question = { type: "score", instructions: $instructions, criteria: $levels }
+    check-question $question {
+        instructions: (metadata $instructions).span
+        criteria: (metadata $levels).span
     }
-
-    for level in $criteria {
-        if ($level | describe -d | get type) != "string" {
-            (fail "invalid level" $"($level | to nuon) is not a string" $span "Each level is a description string. Order them lowest to highest.")
-        }
-    }
-
-    { type: "score", instructions: $instructions, criteria: $criteria }
+    $question
 }
 
-def check-questions [questions: record, span: record] {
-    if ($questions | is-empty) {
-        (fail "no questions" "empty record" $span "Pass a record of question id -> question, built with `jev noul`, `jev choice`, or `jev score`.")
-    }
-
-    for id in ($questions | columns) {
-        let q = $questions | get $id
-        if ($q | describe -d | get type) != "record" {
-            (fail $"invalid question ($id)" $"($id) is not a record" $span "Each entry is a question record. Build one with `jev noul`, `jev choice`, or `jev score`.")
-        }
-        let type = $q.type? | default ""
-        if $type not-in $QUESTION_TYPES {
-            (fail $"invalid question ($id)" $"($id) has type ($type | to nuon)" $span $"Question type must be one of: ($QUESTION_TYPES | str join ', ').")
-        }
-        if ($q.instructions? | default "" | is-empty) {
-            (fail $"invalid question ($id)" $"($id) has no instructions" $span "Every question needs instructions. The id is not sent to the model.")
+def auth-headers []: nothing -> record {
+    let key = $env.TYPESAFE_API_KEY? | default ""
+    if ($key | is-empty) {
+        error make --unspanned {
+            msg: "no TypeSafe API key"
+            help: "Set $env.TYPESAFE_API_KEY. Keys are issued at https://console.typesafe.ai/keys"
         }
     }
+    { Authorization: $"Bearer ($key)" }
 }
 
+def header [name: string]: record -> any {
+    $in.headers.response | where name == $name | get value.0?
+}
+
+# How long to wait before retry number `attempt`, counted from 0.
+#
+# The server's retry-after wins, up to a cap: a pipeline that sleeps for an hour
+# on the server's say-so looks hung.
 def retry-wait [response: record, attempt: int]: nothing -> duration {
-    let header = $response.headers.response
-        | where name == "retry-after"
-        | get value
-        | first
-        | default null
-
-    if $header != null {
-        try { return (($header | into float) * 1sec) }
-    }
+    let seconds = try { $response | header retry-after | into float }
+    if $seconds != null { return ([($seconds * 1sec) $MAX_RETRY_WAIT] | math min) }
 
     # 1s, 2s, 4s, with jitter so a fleet of callers does not retry in lockstep.
-    (2 ** $attempt) * 1sec + ((random float 0.0..0.5) * 1sec)
+    (2 ** $attempt) * 1sec + (random float 0.0..0.5) * 1sec
 }
 
-def request-id [response: record]: nothing -> string {
-    $response.headers.response
-        | where name == "x-typesafe-request-id"
-        | get value
-        | first
-        | default "unknown"
-}
+def api-error [response: record] {
+    let body = $response.body
+    let detail = if ($body | type-of) == "record" { $body.detail? | default $body } else { $body }
 
-def http-fail [response: record] {
-    let detail = $response.body.detail? | default $response.body
-    let message = if ($detail | describe -d | get type) == "record" {
-        $detail.message? | default ($detail | to nuon)
-    } else {
+    # Reporting an error must not raise one of its own, whatever the body holds.
+    let message = try {
+        match ($detail | type-of) {
+            # A 422 lists each field that failed.
+            "list" => ($detail | each {|d| $"($d.loc | skip 1 | str join '.'): ($d.msg)" } | str join "\n")
+            "record" => ($detail.message? | default ($detail | to nuon))
+            _ => ($detail | into string)
+        }
+    } catch {
         $detail | to nuon
     }
 
     let help = match $response.status {
-        400 => "The request was rejected. Check the model name and the question shapes."
+        400 => "The request was rejected. Check the model name."
         401 => "Check $env.TYPESAFE_API_KEY. Keys are issued at https://console.typesafe.ai/keys"
-        422 => "The request body failed validation. Run `jev ask --payload` to see what would be sent."
+        422 => "The request body failed validation. `jev ask --dry-run` shows what is sent."
         429 => "Rate limited. Raise --max-retries, or send fewer, larger requests."
         529 => "TypeSafe is overloaded. Retry in a moment."
         _ => "See https://docs.typesafe.ai/api for the error reference."
@@ -223,138 +263,113 @@ def http-fail [response: record] {
 
     error make --unspanned {
         msg: $"typesafe ($response.status): ($message)"
-        help: $"($help)\nrequest id: (request-id $response)"
+        help: $"($help)\nrequest id: ($response | header x-typesafe-request-id | default unknown)"
     }
 }
 
-def post-systemone [body: record, max_retries: int, timeout: duration] {
-    let url = $"(base-url)/systemone"
+# Call the API and return the response body. A body makes it a POST.
+#
+# Every pass through the loop returns, fails, or sleeps and goes again, which
+# the type checker cannot see. Hence `any` for what is always a record.
+def request [
+    path: string
+    body?: record
+    --max-retries: int = 3
+    --timeout: duration = 2min
+]: nothing -> any {
+    let url = ($env.JEV_BASE_URL? | default $BASE_URL) + $path
     let headers = auth-headers
 
-    mut attempt = 0
-    loop {
-        let response = (
-            http post --full --allow-errors --content-type application/json
-                --max-time $timeout --headers $headers $url $body
-        )
-
-        if $response.status == 200 {
-            return $response.body
+    for attempt in 0..$max_retries {
+        let response = if $body == null {
+            http get --full --allow-errors --max-time $timeout --headers $headers $url
+        } else {
+            (http post --full --allow-errors --max-time $timeout --headers $headers
+                --content-type application/json $url $body)
         }
 
-        if ($response.status in $RETRY_STATUS) and $attempt < $max_retries {
-            sleep (retry-wait $response $attempt)
-            $attempt += 1
-            continue
+        if $response.status == 200 { return $response.body }
+        if $response.status not-in $RETRY_STATUS or $attempt == $max_retries {
+            api-error $response
         }
-
-        http-fail $response
+        sleep (retry-wait $response $attempt)
     }
 }
 
-# Ask a batch of questions about one state
-#
-# The state comes from the pipeline: a string, or a record or list for
-# structured input. Answers come back under the ids you gave the questions.
-# Ask everything the code might need in one call, including questions whose
-# answer only matters for some inputs, then branch on the answers in code.
-@search-terms typesafe systemone evaluate classify confidence
-@example "route a support ticket and read one answer" {
-    "Help! My payouts have been failing for 3 days." | jev ask {
-        dept: (jev choice "Which team should handle this?" {billing: null, technical: null})
-        urgent: (jev noul "Does this convey urgency?")
-    } | get dept.choice
+def "nu-complete jev models" []: nothing -> list<string> {
+    $MODEL_ALIASES
 }
-@example "review the request without sending it" {
-    "a ticket" | jev ask --payload { urgent: (jev noul "Is this urgent?") }
+
+# Put questions to a state and get the answers
+#
+# The state comes from the pipeline: a string, or a record or list when the
+# decision needs several pieces of context. Answers come back under the ids you
+# gave the questions. Every question sees the same state and is answered on its
+# own, in parallel, and only input tokens are billed. So ask everything the code
+# might need in one call, and ignore the answers it does not need.
+@search-terms typesafe systemone evaluate classify decide confidence
+@example "ask two questions and read one answer" {
+    "Help! My payouts have been failing for 3 days." | jev ask {
+        team: (jev choice "Which team should handle this?" {billing: null, technical: null})
+        urgent: (jev noul "Does this convey urgency?")
+    } | get team.choice
+}
+@example "add the answers to each row of a table" {
+    open tickets.json | insert jev { jev ask { urgent: (jev noul "Is this urgent?") } }
+}
+@example "see the request without sending it" {
+    "a ticket" | jev ask --dry-run { urgent: (jev noul "Is this urgent?") }
 } --result {
     state: "a ticket"
     model: "jev-latest"
     questions: { urgent: { type: noul, instructions: "Is this urgent?" } }
 }
-@example "keep the row and add its answers as a column" {
-    open tickets.json | each {|t| $t | jev ask --return merged {
-        urgent: (jev noul "Is this urgent?")
-    } }
-}
 export def ask [
-    questions: record                       # Question id -> question record
-    --model (-m): string@"nu-complete models"  # Model or alias, default $env.JEV_MODEL
-    --return (-r): string = "answers"       # answers, full, or merged
-    --payload                               # Return the request body instead of sending it
-    --max-retries: int = 3                  # Retries on 429 and 529, with backoff
-    --timeout: duration = 2min              # Per-attempt timeout
-]: [string -> any, record -> any, list -> any] {
+    questions: record                               # Question id -> question
+    --model (-m): string@"nu-complete jev models"   # Model or alias. Default: $env.JEV_MODEL
+    --full (-f)                                     # Return the whole response: model, answers, usage
+    --dry-run                                       # Return the request body and send nothing
+    --max-retries: int = 3                          # Retries on 429 and 529, honoring retry-after
+    --timeout: duration = 2min                      # Per attempt
+]: [string -> record, record -> record, list -> record] {
     let state = $in
-    # `metadata $in` points at the caller's pipeline input; the local does not.
-    let state_span = (metadata $in).span
+    let span = (metadata $questions).span
 
-    if $return not-in $RETURN_MODES {
-        (fail "invalid --return" $"($return) is not a return mode" (metadata $return).span $"Use one of: ($RETURN_MODES | str join ', ').")
+    if ($questions | is-empty) {
+        fail "no questions" "empty record" $span "Pass a record of question id -> question, built with `jev noul`, `jev choice`, or `jev score`."
     }
-
-    if $state == null {
-        (fail "no state" "nothing came down the pipeline" $state_span "Pipe the content to evaluate into `jev ask`, as a string, record, or list.")
+    for question in ($questions | transpose id value) {
+        if ($question.value | type-of) != "record" {
+            fail $"question ($question.id): not a question" $"($question.id) is ($question.value | type-of)" $span "Build each question with `jev noul`, `jev choice`, or `jev score`."
+        }
+        check-question $question.value { instructions: $span, criteria: $span } --id $question.id
     }
-
-    if $return == "merged" and ($state | describe -d | get type) != "record" {
-        (fail "cannot merge" $"state is a ($state | describe -d | get type)" $state_span "--return merged adds an `answers` column to a record state. Use --return answers for anything else.")
-    }
-
-    check-questions $questions (metadata $questions).span
 
     let body = {
         state: $state
         model: ($model | default $env.JEV_MODEL? | default $DEFAULT_MODEL)
         questions: $questions
     }
+    if $dry_run { return $body }
 
-    if $payload { return $body }
-
-    let response = post-systemone $body $max_retries $timeout
-
-    match $return {
-        "answers" => $response.answers
-        "full" => $response
-        "merged" => ($state | insert answers $response.answers)
-    }
+    let response = request /systemone $body --max-retries $max_retries --timeout $timeout
+    if $full { $response } else { $response.answers }
 }
 
-# List the models this account can send
+# List the models this account can use
+#
+# The list holds aliases. A versioned id such as `jev-1.13.0` is accepted by
+# `jev ask --model` whether or not it appears here.
 @search-terms typesafe jev version alias
 @example "see what is available" { jev models }
 export def models []: nothing -> table {
-    http get --headers (auth-headers) $"(base-url)/models"
+    request /models
     | get models
     | each {|m| {
         name: $m.name
         released: ($m.release_date | into datetime)
         description: $m.description
     } }
-}
-
-# Model names, cached for a day so tab completion does not wait on the network.
-def model-names []: nothing -> list<string> {
-    let cache = $nu.cache-dir | path join "jev-models.nuon"
-    mkdir $nu.cache-dir
-
-    let fresh = if ($cache | path exists) {
-        ((date now) - (ls $cache | get 0.modified)) < 1day
-    } else {
-        false
-    }
-
-    if $fresh {
-        open $cache
-    } else {
-        let names = models | get name
-        $names | save --force $cache
-        $names
-    }
-}
-
-def "nu-complete models" []: nothing -> list<string> {
-    try { model-names } catch { $FALLBACK_MODELS }
 }
 
 # Typed decisions from the TypeSafe System One API
