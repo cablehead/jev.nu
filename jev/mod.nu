@@ -1,13 +1,12 @@
-# Typed decisions from the TypeSafe System One API
+# Commands for jev, TypeSafe's model that answers questions with probabilities
+# instead of text.
 #
-# A System One model reads a state and answers typed questions about it with
-# calibrated probabilities, so code can branch on a judgment. Build questions
-# with `jev noul`, `jev choice`, and `jev score`, then put them to a state with
-# `jev ask`.
+# Build questions with `jev noul`, `jev choice` and `jev score`. Send them with
+# `jev ask`, which takes the state (the content to judge) from the pipeline.
 #
 # $env.TYPESAFE_API_KEY  required, from https://console.typesafe.ai/keys
 # $env.JEV_MODEL         default model, `jev-latest` when unset
-# $env.JEV_BASE_URL      endpoint, to point the module at a stub
+# $env.JEV_BASE_URL      API endpoint, for pointing the module at the test stub
 
 const BASE_URL = "https://api.typesafe.ai/v1"
 const DEFAULT_MODEL = "jev-latest"
@@ -15,7 +14,7 @@ const MODEL_ALIASES = [jev-latest jev-preview]
 const RETRY_STATUS = [429 529]
 const MAX_RETRY_WAIT = 1min
 
-# Instructions and every description take text or JSON structure.
+# The types allowed for instructions and for a description.
 const ENTRY_TYPES = [string record list]
 const MAX_OPTIONS = 255
 const MAX_LEVELS = 10
@@ -28,12 +27,14 @@ def type-of []: any -> string {
     describe --detailed | get type
 }
 
-# Check one question against the shapes the API accepts.
+# Raise an error if the API would reject a question, or answer it meaninglessly.
 #
-# The API answers a one-option choice or a one-level score with full confidence,
-# which reads as a strong answer and means nothing, so both are errors here.
-# `spans` says where to point. A builder passes the span of each argument.
-# `jev ask` passes the span of its questions record, and the id of the question.
+# The API accepts a choice with one option and a score with one level, and
+# answers both with confidence 1.0. That says nothing, so both are errors here.
+#
+# `spans` holds the source spans an error points at. `jev noul`, `jev choice` and
+# `jev score` pass the span of each argument. `jev ask` has only the span of its
+# questions record, so it passes that for both, along with the question's id.
 def check-question [
     question: record
     spans: record<instructions: record, criteria: record>
@@ -109,9 +110,9 @@ def check-question [
 
 # Build a yes/no question
 #
-# The answer is the probability of yes, from 0 to 1. Near 0.5 means the model
-# splits its bet, not that the truth is in the middle: for a position on a
-# spectrum use `jev score`. Phrase the question so that a high value means yes.
+# The answer is the probability of yes, from 0 to 1. Near 0.5 means jev can't
+# tell, not that the answer is "somewhat". To measure how much, use `jev score`.
+# Word the question so that a high value means yes.
 @search-terms typesafe question boolean probability
 @example "a yes/no question" {
     jev noul "Does the message report a bug?"
@@ -143,9 +144,9 @@ export def noul [
 
 # Build a pick-one question
 #
-# The answer carries the winning option, the probability of every option, and a
-# confidence derived from that distribution. Give the full list of options, and
-# an `other` when the list might not cover every input.
+# The answer names the most probable option and gives the probability of each.
+# Its confidence is low when the options are close. List every option, and add
+# an `other` if an input might fit none of them.
 @search-terms typesafe question classify route category
 @example "route a ticket" {
     jev choice "Which team should handle this?" {
@@ -158,7 +159,7 @@ export def noul [
     instructions: "Which team should handle this?"
     criteria: { billing: "Payments, invoicing, refunds", technical: "Bugs, outages, integrations", sales: null }
 }
-@example "say what an option is not for, when two options blur" {
+@example "say what an option is not for, when two are easy to confuse" {
     jev choice "Which team should handle this?" {
         billing: { what: "Charges and refunds", not_for: "Order tracking" }
         orders: { what: "Delivery and returns", not_for: "Charges" }
@@ -185,10 +186,10 @@ export def choice [
 
 # Build a rate-it-on-a-scale question
 #
-# The answer is a probability-weighted position along the levels. It can land
-# between two of them, so threshold it as a number. The model matches the state
-# against each description on its own, so describe situations ("workaround
-# exists"), not degrees ("moderate").
+# Levels are numbered from 0. The answer's `score` is their average weighted by
+# probability, so it can land between two levels. Jev judges each level without
+# seeing the others, so describe a level as a situation, e.g. "a workaround
+# exists". A degree like "moderate" gives it nothing to match.
 @search-terms typesafe question rate scale severity rubric
 @example "rate customer frustration" {
     jev score "How frustrated is the customer?" ["Calm" "Frustrated" "Very angry"]
@@ -226,13 +227,14 @@ def header [name: string]: record -> any {
 
 # How long to wait before retry number `attempt`, counted from 0.
 #
-# The server's retry-after wins, up to a cap: a pipeline that sleeps for an hour
-# on the server's say-so looks hung.
+# Use the server's retry-after when it sends one, up to MAX_RETRY_WAIT. A
+# pipeline that sleeps for an hour looks hung.
 def retry-wait [response: record, attempt: int]: nothing -> duration {
     let seconds = try { $response | header retry-after | into float }
     if $seconds != null { return ([($seconds * 1sec) $MAX_RETRY_WAIT] | math min) }
 
-    # 1s, 2s, 4s, with jitter so a fleet of callers does not retry in lockstep.
+    # Otherwise 1s, 2s, 4s, plus jitter so that many callers don't all retry at
+    # the same moment.
     (2 ** $attempt) * 1sec + (random float 0.0..0.5) * 1sec
 }
 
@@ -240,7 +242,8 @@ def api-error [response: record] {
     let body = $response.body
     let detail = if ($body | type-of) == "record" { $body.detail? | default $body } else { $body }
 
-    # Reporting an error must not raise one of its own, whatever the body holds.
+    # The body can be anything, e.g. HTML from a proxy, so formatting it must not
+    # raise a second error.
     let message = try {
         match ($detail | type-of) {
             # A 422 lists each field that failed.
@@ -269,8 +272,8 @@ def api-error [response: record] {
 
 # Call the API and return the response body. A body makes it a POST.
 #
-# Every pass through the loop returns, fails, or sleeps and goes again, which
-# the type checker cannot see. Hence `any` for what is always a record.
+# The loop always returns or raises. The type checker can't tell, so the return
+# type is `any`, though it is always a record.
 def request [
     path: string
     body?: record
@@ -300,13 +303,15 @@ def "nu-complete jev models" []: nothing -> list<string> {
     $MODEL_ALIASES
 }
 
-# Put questions to a state and get the answers
+# Ask questions about a state and get the answers
 #
-# The state comes from the pipeline: a string, or a record or list when the
-# decision needs several pieces of context. Answers come back under the ids you
-# gave the questions. Every question sees the same state and is answered on its
-# own, in parallel, and only input tokens are billed. So ask everything the code
-# might need in one call, and ignore the answers it does not need.
+# The state is the content to judge, and it comes from the pipeline: a string,
+# or a record or list when the decision needs several pieces of context. The
+# answers come back under the ids you gave the questions.
+#
+# Jev answers the questions in a call in parallel, and one answer never affects
+# another. Only input tokens are billed, so ask everything the code might need
+# in one call and ignore the answers you don't use.
 @search-terms typesafe systemone evaluate classify decide confidence
 @example "ask two questions and read one answer" {
     "Help! My payouts have been failing for 3 days." | jev ask {
@@ -372,7 +377,7 @@ export def models []: nothing -> table {
     } }
 }
 
-# Typed decisions from the TypeSafe System One API
+# Commands for jev, TypeSafe's model that answers questions with probabilities
 export def main []: nothing -> table {
     scope commands
     | where name starts-with "jev "

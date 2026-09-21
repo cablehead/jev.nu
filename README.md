@@ -1,7 +1,7 @@
 # jev
 
 A [Nushell](https://www.nushell.sh) module for jev, [TypeSafe](https://typesafe.ai)'s
-model that answers questions with probabilities instead of text. Pipe in some
+model that answers questions with probabilities instead of text. Pipe in
 content and ask questions about it. The answers are numbers, so you can filter
 and sort on them.
 
@@ -14,7 +14,7 @@ and sort on them.
 
 ## Install
 
-The module is one Nushell file. There is nothing to build.
+The module is a single Nushell file.
 
 ```nushell
 git clone https://github.com/cablehead/jev.nu
@@ -28,13 +28,13 @@ Put the last two lines in `config.nu` to keep them.
 
 ### 1. State, questions, answers
 
-Jev reads text the way an LLM does, but it never writes any. You list the
-possible answers and it gives each one a probability. (TypeSafe calls this a
-System One model.) A request has three parts:
+Jev reads text like an LLM but never writes any. You list the possible answers,
+and it gives each one a probability. TypeSafe calls this a System One model. A
+request has three parts:
 
 | Jev calls it | What it is                                         | In this module                                                |
 | ------------ | -------------------------------------------------- | ------------------------------------------------------------- |
-| state        | The content to judge                               | Whatever you pipe into `jev ask`                              |
+| state        | The content to judge                               | What you pipe into `jev ask`                                  |
 | questions    | What you want to know, each under an id you choose | A record built with `jev noul`, `jev choice` or `jev score`   |
 | answers      | One answer per question                            | The record `jev ask` returns, under the same ids              |
 
@@ -103,21 +103,22 @@ let questions = {
 Score levels are numbered from 0, and `score` is their average weighted by
 probability. So 1.04 means "Frustrated", with a slight lean toward "Very angry".
 
-A noul of 0.5 means jev can't tell, not that the answer is "somewhat". To
+A noul near 0.5 means jev can't tell, not that the answer is "somewhat". To
 measure how much, use a score.
 
 Jev never sees the question id, so put the whole question in the instructions.
-It also judges each score level separately, without seeing the others. Describe
-a level as a situation ("a workaround exists"), not a degree ("moderate").
+It judges each score level without seeing the others, so describe a level as a
+situation, e.g. "a workaround exists". A degree like "moderate" gives it nothing
+to match.
 
 Instructions and descriptions can also be records or lists, e.g. a rubric with
 examples. See [Advanced: structure](https://docs.typesafe.ai/primitives/advanced).
 
 ### 3. Ask everything in one call
 
-Jev answers all the questions in a call at the same time, each one separately,
-and bills only for input tokens. TypeSafe measured 13 questions in one call as
-12x cheaper and 10x faster than 13 calls.
+Jev answers the questions in a call in parallel, and one answer never affects
+another. Only input tokens are billed. TypeSafe measured 13 questions in one
+call as 12x cheaper and 10x faster than 13 calls.
 
 So ask everything the code might need, even questions that only matter for some
 inputs, and ignore the answers you don't use. Make a second call only when its
@@ -147,10 +148,9 @@ This ticket is about a delivery and also about a charge:
 # => ╰───────────────┴────────────────────╯
 ```
 
-`choice` is the most probable option, even when it barely wins. `confidence`
-tells you how clear the win was: low when the options are close, as here, and 1
-when one option has all the probability. How high to set the bar depends on how
-bad a wrong answer would be:
+`choice` is the most probable option, even when it barely wins. `confidence` is
+low when the options are close, as here, and 1 when one option has all the
+probability. Pick a threshold by how bad a wrong answer would be:
 
 ```nushell
 match $answers.team {
@@ -163,7 +163,7 @@ match $answers.team {
 A noul has no `confidence`. How far it is from 0.5 tells you the same thing.
 
 The numbers move a little between runs. The same request a moment earlier gave
-0.39, so leave room around a threshold. `jev-latest` also changes when TypeSafe
+a confidence of 0.39, so leave room around a threshold. `jev-latest` also changes when TypeSafe
 ships a new model. Once your thresholds are tuned, pin the version with
 `--model jev-1.13.0`.
 
@@ -272,8 +272,7 @@ issues. `par-each` makes them all at once and took 0.4:
 
 ## Reference
 
-`jev` lists the commands, and `help jev ask` (or any other command) has the
-details.
+`jev` lists the commands. `help jev ask` has the details for one.
 
 ```nushell
 jev noul <instructions> [--yes <description>] [--no <description>]
@@ -302,7 +301,7 @@ A choice takes 2 to 255 options and a score 2 to 10 levels. A request can hold
 
 A question can also be a plain record in the
 [API's shape](https://docs.typesafe.ai/api#question-types). `jev ask` checks it
-the same way.
+the way the three commands do.
 
 ### Errors
 
@@ -332,10 +331,10 @@ nu tests/run.nu
 ```
 
 The tests never call TypeSafe. They run every `@example` in the module that has
-a recorded result, and check the error messages. `jev ask` itself is tested
-against [`tests/stub.nu`](tests/stub.nu), a fake API served by
-[http-nu](https://github.com/cablehead/http-nu). Without `http-nu` installed,
-that part is skipped.
+a recorded result, and check the error messages. `jev ask` is tested against the
+stub, [`tests/stub.nu`](tests/stub.nu): a fake TypeSafe API served by
+[http-nu](https://github.com/cablehead/http-nu). Without `http-nu` on the PATH,
+the stub checks are skipped.
 
 ## Learn more
 

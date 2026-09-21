@@ -31,8 +31,8 @@ def questions []: nothing -> record {
 
 # Add jev's answers to each issue, under `jev`
 #
-# `insert` alone would work, making the requests one at a time. `par-each` makes
-# them all at once, which took 0.4 seconds for 12 issues instead of 4.
+# `insert` alone would work, but it makes the requests one at a time. `par-each`
+# makes them all at once, which took 0.4 seconds for 12 issues instead of 4.
 def triage []: table -> table {
     let questions = questions
     # Keep a long pasted log from using up the token budget.

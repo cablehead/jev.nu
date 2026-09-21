@@ -1,11 +1,11 @@
 #!/usr/bin/env nu
 #
-# The jev test suite. Nothing here reaches api.typesafe.ai.
+# The jev test suite. It never calls api.typesafe.ai.
 #
-# Every @example in the module that records a result runs as a test. The checks
-# below cover what an example cannot show: the errors, and `jev ask` on the
-# wire, against tests/stub.nu served by http-nu. Without http-nu on the PATH
-# those are skipped.
+# It runs every @example in the module that has a recorded result. The checks
+# below cover the rest: the error messages, and `jev ask` against the stub
+# (tests/stub.nu, a fake TypeSafe API served by http-nu). Without http-nu on the
+# PATH, the stub checks are skipped.
 
 use std/assert
 
@@ -147,7 +147,7 @@ def stub-checks [log: path]: nothing -> list<record> {
     ]
 }
 
-# Run each @example that records a result, in a fresh nu, as the docs show it.
+# Run each @example that has a recorded result, in a fresh nu, exactly as written.
 def example-results []: nothing -> list<record> {
     scope commands
     | where name starts-with "jev "
@@ -192,7 +192,7 @@ def start-stub [log: path]: nothing -> any {
 }
 
 def main []: nothing -> nothing {
-    # A key or an endpoint in the caller's environment must not leak in.
+    # Ignore any key or endpoint set in the caller's environment.
     $env.TYPESAFE_API_KEY = "stub-key"
     $env.JEV_BASE_URL = "http://127.0.0.1:1"
 

@@ -1,15 +1,15 @@
-# A stand-in for api.typesafe.ai, served by http-nu for tests/run.nu.
+# The stub: a fake TypeSafe API, served by http-nu for tests/run.nu.
 #
 # The `model` of a request picks the behavior:
 #
 #   busy        429 with `retry-after: 0` on the first call, an answer on the next
 #   overloaded  529 every time
-#   invalid     422, in the shape the API reports a failed field
+#   invalid     422, in the shape the API uses to report a bad field
 #   broken      500 with a body that is not JSON, as a proxy would send
 #   otherwise   an answer to every question, the first option or level winning
 #
-# Each request adds a line to $env.JEV_STUB_LOG, which is how the runner counts
-# attempts.
+# Each request adds a line to $env.JEV_STUB_LOG. The runner counts attempts from
+# that file.
 
 def respond [status: int, headers: record = {}]: any -> any {
     to json | metadata set { merge { "http.response": {

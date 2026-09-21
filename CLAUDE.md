@@ -1,45 +1,15 @@
 # jev
 
-Nushell wrapper for the TypeSafe System One API. Jev returns typed decisions with
-calibrated probabilities instead of text, so code can branch on the answer.
+Nushell module for jev, TypeSafe's model that answers questions with
+probabilities instead of text.
 
-README.md is the tutorial: the concepts, then a worked pipeline. Read it first.
+README.md explains the concepts and the commands. Read it first. `help jev ask`
+has the flags.
 
-The key comes from `$env.TYPESAFE_API_KEY`. The default model comes from
-`$env.JEV_MODEL` (`jev-latest` when unset), and `$env.JEV_BASE_URL` overrides the
-endpoint for testing.
+## Using it from an agent
 
-## LLM Usage
-
-Run commands via `nu -c 'use /root/jev/jev; jev <command>'`. Use the full absolute
-path to the module directory. The examples below assume the checkout is at
-`/root/jev`; substitute your own path.
-
-### Build questions
-
-Three question types. Each builder returns a record and sends nothing.
-
-```bash
-nu -c 'use /root/jev/jev; jev noul "Does the message report a bug?"'
-nu -c 'use /root/jev/jev; jev noul "Is this urgent?" --yes "Time-sensitive" --no "No urgency"'
-nu -c 'use /root/jev/jev; jev choice "Which team?" {billing: "Refunds", technical: "Outages", sales: null}'
-nu -c 'use /root/jev/jev; jev score "How frustrated?" ["Calm" "Frustrated" "Very angry"]'
-```
-
-A choice takes 2 to 255 options, each mapped to a description or to null. A score
-takes 2 to 10 levels, lowest first, and answers with a weighted position that can
-land between two of them. A noul answers with the probability of yes and carries
-no confidence.
-
-Instructions and every description take a string, a record, or a list. Reach for
-structure when two options blur: `{what: "...", not_for: "...", examples: [...]}`.
-
-Raw question records work too. `jev ask` runs the same checks on them.
-
-### Ask
-
-One state comes from the pipeline, as a string, record, or list. A list is one
-state, not many.
+Run commands with `nu -c 'use /root/jev/jev; jev <command>'`. Use the absolute
+path to the module directory. The key comes from `$env.TYPESAFE_API_KEY`.
 
 ```bash
 nu -c 'use /root/jev/jev;
@@ -49,63 +19,28 @@ nu -c 'use /root/jev/jev;
   }'
 ```
 
-Flags:
+- Put every question about a state in one `jev ask` call. Jev answers them in
+  parallel and only input tokens are billed.
+- Ask small questions and combine the answers in code. Before weighting a score,
+  divide it by its top level number.
+- Do arithmetic, counting and date math in code. Jev is bad at them.
+- Send only the fields the questions need. Unrelated detail lowers accuracy.
+- To judge each row of a table: `insert jev { select subject body | jev ask $questions }`.
+  For many rows, `par-each --keep-order {|row| $row | insert jev { ... } }` makes
+  the requests at once. Twelve rows took 0.4 seconds that way, against 4.
 
-- `--model (-m)`: model or alias. Pin a version such as `jev-1.13.0` once thresholds are tuned.
-- `--full (-f)`: return the whole response, with the model version and the token usage.
-- `--dry-run`: return the request body and send nothing.
-- `--max-retries`: retries on 429 and 529, honoring `retry-after`. Default 3.
-- `--timeout`: per attempt. Default 2min.
+## Changing the module
 
-To judge each row of a table, let `insert` run `jev ask` per row. The closure
-gets the row as `$in`, so select the fields the questions need:
+The module rejects what the API documents as invalid, plus two questions the API
+accepts and answers meaninglessly: a choice with one option and a score with one
+level. Check a new rule against the live API before adding it. A rule stricter
+than the API blocks valid requests, which has happened once: descriptions that
+were records got rejected.
 
-```bash
-nu -c 'use /root/jev/jev;
-  open tickets.json
-  | insert jev { select subject body | jev ask $questions }
-  | where jev.urgent.noul > 0.8'
-```
-
-Wrap it in `par-each --keep-order {|row| $row | insert jev { ... } }` to send the
-requests together. Twelve rows measured 0.4 seconds against 4.
-
-### Models
-
-```bash
-nu -c 'use /root/jev/jev; jev models'
-```
-
-## Design notes
-
-Every question in a request is evaluated against the state in parallel, and only
-input tokens are billed. Batching 13 questions into one call measures 12x cheaper
-and 10x faster than 13 calls. So ask everything the code might need in one call,
-including questions whose answer only matters for some inputs, and drop the ones
-you do not use.
-
-Ask for a judgment a knowledgeable person makes in a second. A judgment that
-depends on several things gets split into one question per thing, combined with
-weights in code. Divide a score by its top level number before weighting it. Keep
-the questions and the thresholds in one record so a human can review them without
-spelunking.
-
-Confidence is derived from the probability distribution and rides on choice and
-score answers. Gate on it by stakes: a wrong read-only answer is recoverable, a
-wrong destructive one is not. Answers move a little between identical runs, so
-leave room around a threshold.
-
-Jev is weak at arithmetic, counting, and date math. Do those in code and ask only
-for the judgment. Send only the state a question needs: unrelated detail costs
-accuracy. See https://docs.typesafe.ai/model-jaggedness/jev-1.13.
-
-The module validates only what the API documents, plus the two shapes the API
-accepts and answers with nonsense: a one-option choice and a one-level score.
-Check a new rule against the live API before adding it. A rule stricter than the
-API blocks legal requests.
-
-Read the API reference at https://docs.typesafe.ai/api and the cookbooks at
-https://docs.typesafe.ai/cookbooks.
+README.md, the doc comments (they are the `help` text) and this file should say
+the same thing the same way. One name per thing: state, question, answer,
+option, level, the stub. Name the three commands instead of calling them
+builders.
 
 ## Tests
 
@@ -113,15 +48,14 @@ https://docs.typesafe.ai/cookbooks.
 nu tests/run.nu
 ```
 
-Nothing in the suite reaches TypeSafe. It has two parts:
+The tests never call TypeSafe.
 
-- Every `@example` with a `--result` runs as a test. The builders are pure, so
-  their examples cover the happy paths. Add an example with its result whenever
-  you add a builder or change what one returns.
-- The checks in `tests/run.nu` cover the errors, and `jev ask` on the wire against
-  `tests/stub.nu`, a stand-in for the API served by http-nu. The `model` of a
-  request picks the stub's behavior (`busy`, `overloaded`, `invalid`). Without
-  http-nu on the PATH these are skipped.
+- Every `@example` with a `--result` runs as a test. Add one when you add a
+  command or change what one returns.
+- The rest of `tests/run.nu` checks the error messages, and `jev ask` against the
+  stub (`tests/stub.nu`), a fake TypeSafe API served by http-nu. A request's
+  `model` picks the stub's behavior: `busy`, `overloaded`, `invalid`, `broken`.
+  Without http-nu on the PATH the stub checks are skipped.
 
-In an http-nu handler, do not `return` a response early: the returned value loses
-the metadata that carries the status, and a 401 goes out as a 200.
+In an http-nu handler, never `return` a response early. The returned value loses
+the metadata that carries the status, so a 401 goes out as a 200.
